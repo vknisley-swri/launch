@@ -68,10 +68,10 @@ def test_executable():
 
 split_arguments_example1 = f"""
 launch:
-- let:
-    name: args
-    value: '--some-arg "some string"'
-- executable:
+    - let:
+        name: args
+        value: '--some-arg "some string"'
+    - executable:
         cmd: {sys.executable} {os.path.join(os.path.dirname(__file__), 'arg_echo.py')} $(var args)
         log_cmd: True
         shell: False
