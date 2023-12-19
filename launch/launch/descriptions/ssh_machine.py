@@ -1,6 +1,8 @@
+from typing import Optional
+
 from .machine import Machine
 
-"""Module for a description of an SSH connection."""
+"""Module for a description of an SSH machine."""
 
 class SshMachine(Machine):
     """
@@ -10,31 +12,32 @@ class SshMachine(Machine):
 
     def __init__(
         self, *,
-        hostname: string = "",
+        hostname: str,
         port: int = 22,
-        ssh_key_path: string = "",
-        passphrase: Optional[string] = None
+        ssh_key: str,
+        passphrase: Optional[str] = None
     ) -> None:
         """
-        Initialize an ssh connection description.
+        Initialize an ssh connection description. This class presupposes that the SSH connection
+        will be established using keys rather than a password.
 
         :param hostname: A string with the IP address or hostname (if in /etc/hosts)
             of the remote host.
         :param port: The port number over which to make the ssh connection.
-        :param ssh_key_path: Filepath to ssh private key.
+        :param ssh_key: Filepath to ssh private key.
         :param passphrase: Optional passphrase, if the private key requires one.
         """
         self.__hostname = hostname
         self.__port = port
         self.__user = user
-        self.__password = password
-        self.__priv_key_location = priv_key_location
-        self.__ssh_opts = ssh_opts
+        self.__ssh_key = ssh_key
+        self.__passphrase = passphrase
+
 
     @property
-    def host_ip(self):
-        "Getter for host_ip."
-        return self.__host_ip
+    def hostname(self):
+        "Getter for hostname."
+        return self.__hostname
 
     @property
     def port(self):
@@ -42,21 +45,11 @@ class SshMachine(Machine):
         return self.__port
 
     @property
-    def user(self):
-        "Getter for user."
-        return self.__user
+    def ssh_key(self):
+        "Getter for ssh_key."
+        return self.__ssh_key
 
     @property
-    def password(self):
-        "Getter for password."
-        return self.__password
-
-    @property
-    def priv_key_location(self):
-        "Getter for priv_key_location."
-        return self.__priv_key_location
-
-    @property
-    def ssh_opts(self):
-        "Getter for ssh_opts."
-        return self.__ssh_opts
+    def passphrase(self):
+        "Getter for passphrase"
+        return self.__passphrase
