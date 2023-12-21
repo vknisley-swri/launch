@@ -1,3 +1,17 @@
+# Copyright 2024 Southwest Research Institute, All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Module for the ExecuteRemoteProcess action."""
 
 import asyncio
@@ -145,6 +159,22 @@ def get_sub_entities(self):
         return self.__on_exit
     return []
 
+def prepare(self, context: LaunchContext):
+    """Prepare the action for execution."""
+    self.__process_description.prepare(context, self)
+
+    # store packed kwargs for all ProcessEvent based events
+    self.__process_event_args = {
+        'action': self,
+        'name': self.__process_description.final_name,
+        'cmd': self.__process_description.final_cmd,
+        'cwd': self.__process_description.final_cwd,
+        'env': self.__process_description.final_env,
+        # pid is added to the dictionary in the connection_made() method of the protocol.
+    }
+
+    self.__respawn = cast(bool, perform_typed_substitution(context, self.__respawn, bool))
+
 def execute(self, context: LaunchContext) -> Optional[List[LaunchDescriptionEntity]]:
     """
     Execute the action.
@@ -155,8 +185,129 @@ def execute(self, context: LaunchContext) -> Optional[List[LaunchDescriptionEnti
     - configures logging for the IO process event
     - create a task for the coroutine that monitors the process
     """
-    pass
+    self.prepare(context)
+    name = self.__process_description.final_name
+
+    if self.__executed:
+        raise RuntimeError(
+            f"ExecuteLocal action '{name}': executed more than once: {self.describe()}"
+        )
+    self.__executed = True
+
+    if context.is_shutdown:
+        # If shutdown starts before execution can start, don't start execution.
+        return None
+
+    #TODO cached output?
+
+    event_handlers = [
+            EventHandler(
+                matcher=lambda event: is_a_subclass(event, ShutdownProcess),
+                entities=OpaqueFunction(function=self.__on_shutdown_process_event),
+            ),
+            OnProcessIO(
+                target_action=self,
+                on_stdin=self.__on_process_stdin,
+                on_stdout=lambda event: on_output_method(
+                    event, self.__stdout_buffer, self.__stdout_logger),
+                on_stderr=lambda event: on_output_method(
+                    event, self.__stderr_buffer, self.__stderr_logger),
+            ),
+            OnShutdown(
+                on_shutdown=self.__on_shutdown,
+            ),
+            OnProcessExit(
+                target_action=self,
+                # TODO: This is also a little strange, OnProcessExit shouldn't ever be able to
+                # take a None for the callable, but this seems to be the default case?
+                on_exit=self.__on_exit,  # type: ignore
+            ),
+            OnProcessExit(
+                target_action=self,
+                on_exit=flush_buffers_method,
+            ),
+        ]
+        for event_handler in event_handlers:
+            context.register_event_handler(event_handler)
+
+        try:
+            self.__completed_future = context.asyncio_loop.create_future()
+            self.__shutdown_future = context.asyncio_loop.create_future()
+            self.__logger = launch.logging.get_logger(name)
+            if not isinstance(self.__output, dict):
+                self.__stdout_logger, self.__stderr_logger = \
+                    launch.logging.get_output_loggers(
+                            name, perform_substitutions(context, self.__output)
+                            )
+            else:
+                self.__stdout_logger, self.__stderr_logger = \
+                    launch.logging.get_output_loggers(name, self.__output)
+            context.asyncio_loop.create_task(self.__execute_process(context))
+        except Exception:
+            for event_handler in event_handlers:
+                context.unregister_event_handler(event_handler)
+            raise
+        return None
 
 def get_asyncio_future(self) -> Optional[asyncio.Future]:
     """Return an asyncio Future, used to let the launch system know when we're done."""
     return self.__completed_future
+
+def __cleanup(self):
+    # Cancel any pending timers we started.
+    if self.__sigterm_timer is not None:
+        self.__sigterm_timer.cancel()
+    if self.__sigkill_timer is not None:
+        self.__sigkill_timer.cancel()
+    # Close subprocess transport if any.
+    if self._subprocess_transport is not None:
+        self._subprocess_transport.close()
+    # Signal that we're done to the launch system.
+    self.__completed_future.set_result(None)
+
+async def __execute_process(self, context: LaunchContext) -> None:
+    process_event_args = self.__process_event_args
+    if process_event_args is None:
+        raise RuntimeError('process_event_args unexpectedly None')
+    
+    cmd = process_event_args['cmd']
+    cwd = process_event_args['cwd']
+    env = process_event_args['env']
+    if self.__log_cmd:
+        self.__logger.info("process details: cmd='{}', cwd='{}', custom_env?={}".format(
+            ' '.join(filter(lambda part: part.strip(), cmd)),
+            cwd,
+            'True' if env is not None else 'False'
+        ))
+
+    # TODO take into account machine
+
+    except Exception:
+        self.__logger.error('exception occurred while executing process:\n{}'.format(
+            traceback.format_exc()
+        ))
+        self.__cleanup()
+        return
+    
+    # TODO get PID?
+
+    if not context.is_shutdown\
+            and self.__shutdown_future is not None\
+            and not self.__shutdown_future.done()\
+            and self.__respawn and \
+            (self.__respawn_max_retries < 0 or
+                self.__respawn_retries < self.__respawn_max_retries):
+        # Increase the respawn_retries counter
+        self.__respawn_retries += 1
+        if self.__respawn_delay is not None and self.__respawn_delay > 0.0:
+            # wait for a timeout(`self.__respawn_delay`) to respawn the process
+            # and handle shutdown event with future(`self.__shutdown_future`)
+            # to make sure `ros2 launch` exit in time
+            await asyncio.wait(
+                (self.__shutdown_future,),
+                timeout=self.__respawn_delay
+            )
+        if not self.__shutdown_future.done():
+            context.asyncio_loop.create_task(self.__execute_process(context))
+            return
+    self.__cleanup()
